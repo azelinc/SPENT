@@ -203,6 +203,24 @@ auth.onAuthStateChanged(user=>{
         refreshDash();
         refreshReviewBadge();
         attachListeners(user.uid);
+        // TEST: bill notification via native Android bridge
+        loadBills(user.uid).then(bills=>{
+          try{
+            const n=new Date(), today=n.getDate(), mk=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
+            let overdue=0, due=0;
+            bills.forEach(b=>{
+              if(b.active===false||(b.paidMonths||{})[mk]||!b.dueDay)return;
+              const diff=today-b.dueDay;
+              if(diff>0)overdue++;else if(diff>=-3)due++;
+            });
+            if(overdue||due){
+              if(typeof AndroidNotification!=='undefined'){
+                AndroidNotification.show('💳 Bills Due',overdue+' overdue · '+due+' due soon');
+                console.log('[TEST] Native notification sent:',overdue,'overdue,',due,'due');
+              }
+            }
+          }catch(e){console.warn('[TEST] Bill notif error:',e)}
+        });
       });
     }
   }else{
