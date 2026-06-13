@@ -203,24 +203,18 @@ auth.onAuthStateChanged(user=>{
         refreshDash();
         refreshReviewBadge();
         attachListeners(user.uid);
-        // TEST: bill notification via native Android bridge
-        loadBills(user.uid).then(bills=>{
-          try{
-            const n=new Date(), today=n.getDate(), mk=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
-            let overdue=0, due=0;
-            bills.forEach(b=>{
-              if(b.active===false||(b.paidMonths||{})[mk]||!b.dueDay)return;
-              const diff=today-b.dueDay;
-              if(diff>0)overdue++;else if(diff>=-3)due++;
-            });
-            if(overdue||due){
-              if(typeof AndroidNotification!=='undefined'){
-                AndroidNotification.show('💳 Bills Due',overdue+' overdue · '+due+' due soon');
-                console.log('[TEST] Native notification sent:',overdue,'overdue,',due,'due');
-              }
-            }
-          }catch(e){console.warn('[TEST] Bill notif error:',e)}
-        });
+        // ─── Bill notification via native bridge ───
+        // 1. Check on load
+        checkBillNotifications(user.uid);
+        // 2. Persistent listener for background updates
+        if(!window._billNotifListener){
+          window._billNotifListener = true;
+          billsRef(user.uid).on('value', ()=>{
+            checkBillNotifications(user.uid);
+          });
+        }
+        // 3. Register FCM token from JS (so SPENT gets its own token)
+        registerSpentFCM(user.uid);
       });
     }
   }else{
@@ -1591,6 +1585,40 @@ function updateBill(uid, billId, data){
 
 function deleteBill(uid, billId){
   return billsRef(uid).child(billId).remove();
+}
+
+/* ─── BILL NOTIFICATIONS ─── */
+function checkBillNotifications(uid){
+  loadBills(uid).then(bills=>{
+    const n=new Date(), today=n.getDate(), mk=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
+    let overdue=0, due=0, names=[];
+    bills.forEach(b=>{
+      if(b.active===false||!b.dueDay)return;
+      if(b.paidMonths&&b.paidMonths[mk])return;
+      const diff=today-b.dueDay;
+      if(diff>0){overdue++;names.push('🔴 '+b.name);}
+      else if(diff>=-3){due++;if(names.length<3)names.push('🟡 '+b.name);}
+    });
+    if(overdue||due){
+      const title='💳 '+(overdue?overdue+' overdue':'')+(overdue&&due?' · ':'')+(due?due+' due soon':'');
+      const body=names.slice(0,4).join('\n');
+      if(typeof AndroidNotification!=='undefined'){
+        AndroidNotification.show(title, body);
+      }
+    }
+  }).catch(e=>console.warn('[Bills] check error:',e));
+}
+
+function registerSpentFCM(uid){
+  if(typeof AndroidNotification==='undefined')return;
+  try{
+    // Request FCM token from Firebase JS SDK and store via native bridge
+    if(typeof firebase!=='undefined'&&firebase.messaging){
+      firebase.messaging().getToken().then(token=>{
+        AndroidNotification.storeTokenInDb(uid,token,'spent-web');
+      }).catch(()=>{});
+    }
+  }catch(e){}
 }
 
 /* ─── BILLS NAV ─── */
