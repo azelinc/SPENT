@@ -212,6 +212,13 @@ auth.onAuthStateChanged(user=>{
           billsRef(user.uid).on('value', ()=>{
             checkBillNotifications(user.uid);
           });
+          // Also listen for server-triggered notifications
+          db.ref('_notifications/'+user.uid+'/bills').on('value', snap=>{
+            if(snap.val()){
+              checkBillNotifications(user.uid);
+              db.ref('_notifications/'+user.uid+'/bills').remove();
+            }
+          });
         }
         // 3. Register FCM token from JS (so SPENT gets its own token)
         registerSpentFCM(user.uid);
