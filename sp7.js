@@ -204,23 +204,13 @@ auth.onAuthStateChanged(user=>{
         refreshReviewBadge();
         attachListeners(user.uid);
         // ─── Bill notification via native bridge ───
-        // 1. Check on load
         checkBillNotifications(user.uid);
-        // 2. Persistent listener for background updates
         if(!window._billNotifListener){
           window._billNotifListener = true;
           billsRef(user.uid).on('value', ()=>{
             checkBillNotifications(user.uid);
           });
-          // Also listen for server-triggered notifications
-          db.ref('_notifications/'+user.uid+'/bills').on('value', snap=>{
-            if(snap.val()){
-              checkBillNotifications(user.uid);
-              db.ref('_notifications/'+user.uid+'/bills').remove();
-            }
-          });
         }
-        // 3. Register FCM token from JS (so SPENT gets its own token)
         registerSpentFCM(user.uid);
       });
     }
@@ -1596,6 +1586,13 @@ function deleteBill(uid, billId){
 
 /* ─── BILL NOTIFICATIONS ─── */
 function checkBillNotifications(uid){
+  // Dedup: only once per day per device
+  try{
+    const today = new Date().toDateString();
+    const last = localStorage.getItem('_billNotifDate');
+    if(last === today) return; // already notified today
+  }catch(e){}
+  
   loadBills(uid).then(bills=>{
     const n=new Date(), today=n.getDate(), mk=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
     let overdue=0, due=0, names=[];
@@ -1603,14 +1600,15 @@ function checkBillNotifications(uid){
       if(b.active===false||!b.dueDay)return;
       if(b.paidMonths&&b.paidMonths[mk])return;
       const diff=today-b.dueDay;
-      if(diff>0){overdue++;names.push('🔴 '+b.name);}
-      else if(diff>=-3){due++;if(names.length<3)names.push('🟡 '+b.name);}
+      if(diff>0){overdue++;names.push('\u{1f534} '+b.name);}
+      else if(diff>=-3){due++;if(names.length<3)names.push('\u{1f7e1} '+b.name);}
     });
     if(overdue||due){
-      const title='💳 '+(overdue?overdue+' overdue':'')+(overdue&&due?' · ':'')+(due?due+' due soon':'');
-      const body=names.slice(0,4).join('\n');
+      const title='\u{1f4b3} '+(overdue?overdue+' overdue':'')+(overdue&&due?' \u00b7 ':'')+(due?due+' due soon':'');
+      const body=names.slice(0,4).join('\\n');
       if(typeof AndroidNotification!=='undefined'){
         AndroidNotification.show(title, body);
+        try{localStorage.setItem('_billNotifDate', new Date().toDateString());}catch(e){}
       }
     }
   }).catch(e=>console.warn('[Bills] check error:',e));
