@@ -228,6 +228,23 @@ html, body {
   color: var(--success);
 }
 
+.item-amount.adj {
+  color: var(--danger);
+  opacity: 0.7;
+}
+
+.adj-tag {
+  display: inline-block;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  margin-left: 4px;
+  letter-spacing: 0.3px;
+}
+
 .amount-display.income {
   color: var(--success);
 }
@@ -600,6 +617,21 @@ html, body {
   width: 100%;
   margin-top: 12px;
 }
+
+.btn-ghost.btn-lg {
+  padding: 16px 24px;
+  font-size: 1.1rem;
+  width: 100%;
+  margin-top: 12px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+  border-radius: var(--radius);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-ghost.btn-lg:active { background: rgba(59,130,246,0.1); }
 
 /* MODAL */
 .modal-overlay {
