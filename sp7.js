@@ -22,12 +22,11 @@ $('global-version').textContent = APP_VER;
 
 /* ─── CONSTANTS ─── */
 const CATEGORIES = [
-  'Food & Dining','Groceries','Transport','Shopping',
+  'Food','Transport','Shopping',
   'Utilities','Entertainment','Health & Wellness','Home','Others'
 ];
 const DEFAULT_CATEGORY_SUBS = {
-  'Food & Dining': ['Lunch', 'Dinner', 'Supper', 'Snack', 'Breakfast', 'Teh', 'Kopi'],
-  'Groceries': ['Weekly Top-up', 'Bulk', 'Emergency', '99 Speedmart'],
+  'Food': ['Lunch', 'Dinner', 'Supper', 'Snack', 'Breakfast', 'Teh', 'Kopi', 'Groceries'],
   'Transport': ['Fuel', 'Toll', 'Parking', 'Grab', 'Public', 'JPJ'],
   'Shopping': ['Online', 'Mall', 'Essentials', 'Big Purchase'],
   'Utilities': ['TNB', 'Unifi', 'Water', 'Phone', 'Astro'],
@@ -47,12 +46,8 @@ const DEFAULT_ACCOUNTS = {
   'Others': '#94a3b8'
 };
 let accountColors = {}; // loaded from Firebase per-user
-let hiddenAccounts = {}; // { name: true } for hidden payment methods
-let categoryOrder = [];  // MRU order for categories
-let accountOrder = [];   // MRU order for accounts
 const DEFAULT_SUBCATEGORIES = {
-  'Food & Dining': ['Lunch','Dinner','Breakfast','Snack','Drinks'],
-  'Groceries': ['Weekly','Top-up','Bulk'],
+  'Food': ['Lunch','Dinner','Breakfast','Snack','Drinks','Groceries'],
   'Transport': ['Fuel','Toll','Parking','Ride'],
   'Shopping': ['Clothing','Electronics','Home','Personal'],
   'Utilities': ['Electric','Water','Internet','Mobile'],
@@ -62,8 +57,7 @@ const DEFAULT_SUBCATEGORIES = {
   'Others': []
 };
 const QUICK_TILES = [
-  { category: 'Food & Dining' },
-  { category: 'Groceries' },
+  { category: 'Food' },
   { category: 'Transport' },
   { category: 'Shopping' },
   { category: 'Utilities' },
@@ -84,8 +78,17 @@ let lastPayment = 'Cash';
 let selectedCat = '';
 let selectedSub = '';
 let isIncomeEdit = false;
-let splitActive = false;
-let splitRows = [];  // [{category, amount}]
+let showAllRecent = false;
+// Frequency tracking for smart chips
+let catFreq = JSON.parse(localStorage.getItem('sp7_catFreq')||'{}');
+let payFreq = JSON.parse(localStorage.getItem('sp7_payFreq')||'{}');
+let showAllCats = false;
+let showAllPay = false;
+function saveCatFreq(){ try{ localStorage.setItem('sp7_catFreq',JSON.stringify(catFreq)); }catch(e){} }
+function savePayFreq(){ try{ localStorage.setItem('sp7_payFreq',JSON.stringify(payFreq)); }catch(e){} }
+function getTop(arr, freq, n){
+  return [...arr].sort((a,b)=>(freq[b]||0)-(freq[a]||0)).slice(0,n);
+}
 
 /* ─── HELPERS ─── */
 function $(id){ return document.getElementById(id); }
@@ -98,9 +101,6 @@ function fmtDateDisplay(iso){
 function fmtMoney(n){ return 'RM '+n.toFixed(2); }
 function parseMoney(s){ const v=parseFloat(s); return isNaN(v)?0:v; }
 function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
-function applyTheme(theme){
-  document.documentElement.classList.toggle('light-mode', theme === 'light');
-}
 function loadCategorySubs(){
   return db.ref('config/categorySubs').once('value').then(s=>{
     categorySubs = s.val() || DEFAULT_CATEGORY_SUBS;
@@ -111,13 +111,6 @@ function loadCategorySubs(){
     }
   }).catch(()=>{
     categorySubs = DEFAULT_CATEGORY_SUBS;
-  }).then(()=>{
-    // Also load per-user category MRU order
-    if(currentUser){
-      return db.ref(`users/${currentUser.uid}/settings/categoryOrder`).once('value').then(s=>{
-        categoryOrder = s.val() || [];
-      }).catch(()=>{ categoryOrder = []; });
-    }
   });
 }
 
@@ -144,9 +137,6 @@ window.addEventListener('popstate', e=>{
     const parent = SCREEN_PARENT[state.screen];
     if(parent){
       showScreen(parent, true); // silent — no history push
-    }else{
-      // Root screen (dash-screen) — show it and DON'T fall through to exit logic
-      showScreen(state.screen, true);
     }
   }else{
     if(!backTimer){
@@ -177,41 +167,18 @@ window.addEventListener('popstate', e=>{
 });
 
 /* ─── AUTH ─── */
-let authTimeout = setTimeout(()=>{
-  // If auth hasn't resolved in 3s, show login form anyway
-  const loading = $('login-loading');
-  const form = $('login-form');
-  if(loading) loading.style.display = 'none';
-  if(form) form.style.display = 'block';
-}, 3000);
-
 auth.onAuthStateChanged(user=>{
-  clearTimeout(authTimeout);
-  const loading = $('login-loading');
-  const form = $('login-form');
-  if(loading) loading.style.display = 'none';
-  if(form) form.style.display = 'block';
   authReady = true;
   if(user){
     if(!currentUser){
       Promise.all([loadUserProfile(user.uid), loadSettings(user.uid)]).then(([profile, settings])=>{
         currentUser = { uid:user.uid, name:profile?.name||user.displayName||'User', email:user.email };
         isSubAccount = !!settings.ownerUid;
-        applyTheme(settings.theme || 'dark');
         $('dash-greeting').textContent = 'Hello, '+currentUser.name;
         showScreen('dash-screen');
         refreshDash();
         refreshReviewBadge();
         attachListeners(user.uid);
-        // ─── Bill notification via native bridge ───
-        checkBillNotifications(user.uid);
-        if(!window._billNotifListener){
-          window._billNotifListener = true;
-          billsRef(user.uid).on('value', ()=>{
-            checkBillNotifications(user.uid);
-          });
-        }
-        registerSpentFCM(user.uid);
       });
     }
   }else{
@@ -292,28 +259,16 @@ function loadOwnerLinks(ownerUid){
 }
 
 function loadPaymentMethods(uid){
-  return db.ref(`users/${uid}/settings`).once('value').then(s=>{
-    const settings = s.val() || {};
-    const accounts = settings.accounts;
-    hiddenAccounts = settings.hiddenAccounts || {};
-    accountOrder = settings.accountOrder || [];
-    if(accounts && typeof accounts === 'object'){
-      accountColors = accounts;
-      let list = Object.keys(accounts).filter(name => !hiddenAccounts[name]);
-      // Sort by MRU order
-      if(accountOrder.length){
-        list.sort((a,b) => (accountOrder.indexOf(a)===-1?999:accountOrder.indexOf(a)) - (accountOrder.indexOf(b)===-1?999:accountOrder.indexOf(b)));
-      }
-      return list;
+  return db.ref(`users/${uid}/settings/accounts`).once('value').then(s=>{
+    const val = s.val();
+    if(val && typeof val === 'object'){
+      accountColors = val;
+      return Object.keys(val);
     }
     accountColors = {};
-    hiddenAccounts = {};
-    accountOrder = [];
     return Object.keys(DEFAULT_ACCOUNTS);
   }).catch(()=>{
     accountColors = {};
-    hiddenAccounts = {};
-    accountOrder = [];
     return Object.keys(DEFAULT_ACCOUNTS);
   });
 }
@@ -525,7 +480,9 @@ function renderDash(combined, today, monthPrefix, approvedPartners){
     const dateCmp = (b.date||'').localeCompare(a.date||'');
     if(dateCmp !== 0) return dateCmp;
     return (b.timestamp||0)-(a.timestamp||0);
-  }).slice(0,20);
+  });
+  const showCount = showAllRecent ? recentList.length : Math.min(20, recentList.length);
+  const displayList = recentList.slice(0, showCount);
   if(recentList.length===0){
     recent.innerHTML='<div class="item"><div class="item-left"><span class="item-name">No expenses yet</span></div></div>';
   }else{
@@ -545,14 +502,11 @@ function renderDash(combined, today, monthPrefix, approvedPartners){
         parentChildren[pid].push(ce);
       }
     });
-    recentList.forEach(e=>{
+    displayList.forEach(e=>{
       if (skipChild[e.id]) return;
       const isPartner = e._uid !== currentUser.uid;
       const tag = isPartner ? `<span class="partner-tag">${esc(e._user)}</span>` : '';
       const statusLabel = e.status==='pending' ? ' <span style="color:var(--danger);font-size:0.7rem">[PENDING]</span>' : '';
-      const splits = e.splits && e.splits.length > 1 ? e.splits : null;
-      const splitBadge = splits ? ` <span style="font-size:.55rem;color:var(--muted);background:var(--surface-2);border-radius:3px;padding:0 4px">+${splits.length-1} more</span>` : '';
-      const displayName = splits ? esc(splits[0].category + (splits[0].subCategory ? ' - ' + splits[0].subCategory : '')) : esc(e.category + (e.subCategory ? ' - ' + e.subCategory : ''));
       const canEdit = checkEditAllowed(e, isOwnerView);
       const isOwner = isOwnerView && e._uid !== currentUser.uid;
 
@@ -573,7 +527,7 @@ function renderDash(combined, today, monthPrefix, approvedPartners){
       item.innerHTML = `
         <div class="item-left">
           <div class="item-name-row">
-            <span class="item-name">${displayName}${splitBadge}${tag}${statusLabel}${adjTag}</span>
+            <span class="item-name">${esc(e.category + (e.subCategory ? ' - ' + e.subCategory : ''))}${tag}${statusLabel}${adjTag}</span>
             ${e.notes ? '<span class="item-remarks">' + esc(e.notes) + '</span>' : ''}
             ${e.type === 'income' ? '<span class="item-income-tag">Income</span>' : ''}
             ${inlineActions}
@@ -617,6 +571,18 @@ function renderDash(combined, today, monthPrefix, approvedPartners){
       }
     });
 
+    // Show More / Show Less toggle
+    if (recentList.length > 20) {
+      const toggleBtn = document.createElement('div');
+      toggleBtn.className = 'show-more-btn';
+      toggleBtn.textContent = showAllRecent ? '▲ Show Less' : '▼ Show More (' + (recentList.length - 20) + ' more)';
+      toggleBtn.addEventListener('click', () => {
+        showAllRecent = !showAllRecent;
+        refreshDash();
+      });
+      recent.appendChild(toggleBtn);
+    }
+
     // Inline approve listeners
     recent.querySelectorAll('.inline-approve').forEach(btn=>{
       btn.addEventListener('click',(ev)=>{
@@ -647,7 +613,10 @@ function getSubs(cat){
 function buildCatChips(selected){
   const wrap = $('cat-chips');
   wrap.innerHTML = '';
-  CATEGORIES.forEach(cat => {
+  const top4 = getTop(CATEGORIES, catFreq, 4);
+  const hasMore = CATEGORIES.length > 4 && !showAllCats;
+  const display = showAllCats ? CATEGORIES : top4;
+  display.forEach(cat => {
     const el = document.createElement('div');
     el.className = cat === selected ? 'tile on' : 'tile';
     el.textContent = cat;
@@ -667,6 +636,19 @@ function buildCatChips(selected){
     });
     wrap.appendChild(el);
   });
+  if(hasMore){
+    const more = document.createElement('div');
+    more.className = 'tile more-tile';
+    more.textContent = `+${CATEGORIES.length - 4} more`;
+    more.addEventListener('click',()=>{ showAllCats = true; buildCatChips(selected); });
+    wrap.appendChild(more);
+  }else if(showAllCats){
+    const less = document.createElement('div');
+    less.className = 'tile more-tile';
+    less.textContent = '← Less';
+    less.addEventListener('click',()=>{ showAllCats = false; buildCatChips(selected); });
+    wrap.appendChild(less);
+  }
 }
 
 function buildSubChips(cat, selected){
@@ -676,10 +658,11 @@ function buildSubChips(cat, selected){
   const subs = getSubs(cat);
   back.style.display = 'block';
   back.onclick = () => {
+    showAllCats = false;
     selectedCat = '';
     selectedSub = '';
     $('subcat-field').classList.add('hidden');
-    buildCatChips('');
+    buildCatLevel1('');
   };
   subs.forEach(sub => {
     const el = document.createElement('div');
@@ -694,7 +677,8 @@ function buildSubChips(cat, selected){
 }
 
 function openAdd(preCategory, preSubCategory){
-  resetSplit();
+  showAllCats = false;
+  showAllPay = false;
   isIncomeEdit = false;
   document.querySelector('.add-title').textContent = 'New Expense';
   $('amount-display').classList.remove('income');
@@ -703,39 +687,41 @@ function openAdd(preCategory, preSubCategory){
   amountStr='';
   $('amount-display').textContent='0.00';
   $('add-expense-for').value = '';
-  const cat = preCategory || lastCategory || '';
-  $('cat-detected').textContent=cat;
-  $('add-category').value = cat;
+  // Pick default category: passed-in, last-used, most frequent, or first
+  const bestCat = preCategory || lastCategory || Object.keys(catFreq).sort((a,b)=>catFreq[b]-catFreq[a])[0] || CATEGORIES[0];
+  const bestPay = lastPayment || Object.keys(payFreq).sort((a,b)=>payFreq[b]-payFreq[a])[0] || 'Cash';
+  $('cat-detected').textContent = bestCat;
+  $('add-category').value = bestCat;
   const todayIso = fmtDate(now());
   $('add-date').value = todayIso;
   $('date-detected').textContent = fmtDateDisplay(todayIso);
   $('btn-save').textContent = 'Save';
   $('btn-delete').classList.add('hidden');
-  $('btn-reallocate').classList.add('hidden');
+  $('btn-action').classList.add('hidden');
   $('add-remarks').value = '';
   // Hide level 2, show level 1
   $('sub-chips').classList.add('hidden');
-  selectedCat = preCategory || lastCategory || '';
+  selectedCat = bestCat;
   selectedSub = preSubCategory || lastSubCategory || '';
-  buildCatChips(selectedCat);
-  if(selectedCat && getSubs(selectedCat).length > 0){
+  if(bestCat && getSubs(bestCat).length > 0){
     $('subcat-field').classList.remove('hidden');
     buildSubChips(selectedCat, selectedSub);
   } else {
     $('subcat-field').classList.add('hidden');
   }
   loadPaymentMethods(currentUser.uid).then(methods=>{
-    const payment = lastPayment || methods[0];
-    buildPayChips(methods, payment);
+    buildPayChips(methods, bestPay);
   });
   loadCategorySubs().then(()=>{
-    buildCatLevel1(cat || 'Others');
+    buildCatLevel1(bestCat);
   });
   buildSuggest();
   showScreen('add-screen');
 }
 
 function openEdit(expense){
+  showAllCats = false;
+  showAllPay = false;
   editTarget = { uid: expense._uid, id: expense.id };
   amountStr = String(expense.amount);
   $('amount-display').textContent = expense.amount.toFixed(2);
@@ -756,7 +742,7 @@ function openEdit(expense){
     $('add-remarks').value = expense.notes || '';
     $('btn-save').textContent = 'Update';
     $('btn-delete').classList.remove('hidden');
-    $('btn-reallocate').classList.remove('hidden');
+    $('btn-action').classList.remove('hidden');
     loadPaymentMethods(expense._uid).then(methods=>{
       const payment = expense.payment || methods[0];
       buildPayChips(methods, payment);
@@ -778,8 +764,7 @@ function openEdit(expense){
   selectedSub = expense.subCategory || '';
   $('btn-save').textContent = 'Update';
   $('btn-delete').classList.remove('hidden');
-  $('btn-reallocate').classList.remove('hidden');
-  buildCatChips(selectedCat);
+  $('btn-action').classList.remove('hidden');
   if(selectedCat && getSubs(selectedCat).length > 0){
     $('subcat-field').classList.remove('hidden');
     buildSubChips(selectedCat, selectedSub);
@@ -805,12 +790,11 @@ function buildCatLevel1(selected){
   if(!wrap) return;
   wrap.innerHTML = '';
   wrap.classList.remove('hidden');
-  let cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
-  // Sort by MRU order
-  if(categoryOrder && categoryOrder.length){
-    cats.sort((a,b) => (categoryOrder.indexOf(a)===-1?999:categoryOrder.indexOf(a)) - (categoryOrder.indexOf(b)===-1?999:categoryOrder.indexOf(b)));
-  }
-  cats.forEach(c=>{
+  const cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
+  const top4 = getTop(cats, catFreq, 4);
+  const hasMore = cats.length > 4 && !showAllCats;
+  const display = showAllCats ? cats : top4;
+  display.forEach(c=>{
     const el = document.createElement('div');
     el.className = 'tile' + (c===selected ? ' on' : '');
     el.textContent = c;
@@ -831,6 +815,19 @@ function buildCatLevel1(selected){
     });
     wrap.appendChild(el);
   });
+  if(hasMore){
+    const more = document.createElement('div');
+    more.className = 'tile more-tile';
+    more.textContent = `+${cats.length - 4} more`;
+    more.addEventListener('click',()=>{ showAllCats = true; buildCatLevel1(selected); });
+    wrap.appendChild(more);
+  }else if(showAllCats){
+    const less = document.createElement('div');
+    less.className = 'tile more-tile';
+    less.textContent = '← Less';
+    less.addEventListener('click',()=>{ showAllCats = false; buildCatLevel1(selected); });
+    wrap.appendChild(less);
+  }
 }
 
 function showCatLevel2(cat, subs){
@@ -875,42 +872,6 @@ $('btn-save').addEventListener('click',()=>{
   const amount=parseMoney(amountStr);
   const payment = $('add-payment').value || 'Cash';
   const notes = $('add-remarks').value.trim();
-
-  // Split mode — categories are in split rows, skip single-category validations
-  if(splitActive){
-    const ts = Date.now();
-    const useDate = $('add-date').value || fmtDate(now());
-    const validRows = splitRows.filter(r => r.amount > 0 && r.category);
-    if(validRows.length < 2){ alert('Need at least 2 split parts with amounts'); return; }
-    const splitSum = validRows.reduce((a,r) => a + r.amount, 0);
-    const splits = validRows.map(r => {
-      const s = { category: r.category, amount: r.amount };
-      if(r.subCategory) s.subCategory = r.subCategory;
-      return s;
-    });
-    loadSettings(currentUser.uid).then(settings=>{
-      const expense = {
-        category: splits[0].category,
-        amount: splitSum,
-        payment,
-        notes: notes || 'Split',
-        date: useDate,
-        timestamp: ts,
-        status: !settings.ownerUid ? 'approved' : 'pending',
-        type: 'expense',
-        splits
-      };
-      saveExpense(currentUser.uid, expense).then(()=>{
-        lastPayment = payment;
-        updateMruOrder(splits[0].category, payment);
-        resetSplit();
-        showScreen('dash-screen');
-        refreshDash();
-      });
-    });
-    return;
-  }
-
   if(!category){ alert('Select a category'); return; }
   if(amount<=0){ alert('Enter amount'); return; }
 
@@ -923,7 +884,9 @@ $('btn-save').addEventListener('click',()=>{
       lastCategory = category;
       lastSubCategory = subCategory;
       lastPayment = payment;
-      updateMruOrder(category, payment);
+      catFreq[category] = (catFreq[category]||0) + 1;
+      payFreq[payment] = (payFreq[payment]||0) + 1;
+      saveCatFreq(); savePayFreq();
       editTarget = null;
       showScreen('dash-screen');
       refreshDash();
@@ -932,7 +895,6 @@ $('btn-save').addEventListener('click',()=>{
     // CREATE MODE
     const ts = Date.now();
     const useDate = $('add-date').value || fmtDate(now());
-
     const expense = {
       category, amount, payment, notes,
       date: useDate,
@@ -950,7 +912,9 @@ $('btn-save').addEventListener('click',()=>{
         lastCategory = category;
         lastSubCategory = subCategory;
         lastPayment = payment;
-        updateMruOrder(category, payment);
+        catFreq[category] = (catFreq[category]||0) + 1;
+        payFreq[payment] = (payFreq[payment]||0) + 1;
+        saveCatFreq(); savePayFreq();
         showScreen('dash-screen');
         refreshDash();
       });
@@ -975,202 +939,6 @@ document.querySelectorAll('.numpad button').forEach(btn=>{
     $('amount-display').textContent=amountStr?parseFloat(amountStr).toFixed(2):'0.00';
   });
 });
-
-/* ─── SPLIT SYSTEM ─── */
-$('btn-split-toggle').addEventListener('click', toggleSplit);
-$('btn-add-split-row').addEventListener('click', addSplitRow);
-
-function toggleSplit(){
-  splitActive = !splitActive;
-  const panel = $('split-panel');
-  const info = $('split-info');
-  const btn = $('btn-split-toggle');
-  if(splitActive){
-    panel.classList.remove('hidden');
-    info.classList.remove('hidden');
-    btn.textContent = '⚡ Split ON';
-    btn.style.background = 'var(--accent)';
-    btn.style.color = '#fff';
-    // Hide category chips when in split mode
-    $('cat-chips').classList.add('hidden');
-    $('sub-chips').classList.add('hidden');
-    $('subcat-field').classList.add('hidden');
-    // Dim amount display — sum of splits drives total
-    $('amount-display').style.opacity = '0.5';
-    // Init with 2 rows using current category, split equally
-    const cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
-    const cat = selectedCat && cats.includes(selectedCat) ? selectedCat : (cats[0] || 'Others');
-    const total = parseMoney(amountStr);
-    if(total <= 0){ splitRows = []; }
-    else {
-      const half = +(total / 2).toFixed(2);
-      splitRows = [{ category: cat, subCategory: '', amount: half }, { category: 'Others', subCategory: '', amount: +(total - half).toFixed(2) }];
-    }
-    buildSplitRows();
-    updateSplitTotal();
-  }else{
-    panel.classList.add('hidden');
-    info.classList.add('hidden');
-    btn.textContent = '⚡ Split';
-    btn.style.background = '';
-    btn.style.color = '';
-    $('amount-display').style.opacity = '1';
-    // Restore category chips
-    $('cat-chips').classList.remove('hidden');
-    if(selectedCat && getSubs(selectedCat).length > 0){
-      $('subcat-field').classList.remove('hidden');
-    }
-    splitRows = [];
-  }
-}
-
-function buildSplitRows(){
-  const wrap = $('split-rows');
-  wrap.innerHTML = '';
-  splitRows.forEach((r, i) => {
-    const row = document.createElement('div');
-    row.className = 'split-row';
-    // Category select
-    const sel = document.createElement('select');
-    sel.className = 'split-cat';
-    let cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
-    if(categoryOrder && categoryOrder.length){
-      cats.sort((a,b) => (categoryOrder.indexOf(a)===-1?999:categoryOrder.indexOf(a)) - (categoryOrder.indexOf(b)===-1?999:categoryOrder.indexOf(b)));
-    }
-    cats.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c;
-      opt.textContent = c;
-      if(c === r.category) opt.selected = true;
-      sel.appendChild(opt);
-    });
-    // Subcategory select
-    const subSel = document.createElement('select');
-    subSel.className = 'split-sub';
-    fillSubSelect(subSel, sel.value, r.subCategory || '');
-    sel.addEventListener('change', () => {
-      splitRows[i].category = sel.value;
-      splitRows[i].subCategory = '';
-      fillSubSelect(subSel, sel.value, '');
-      updateSplitTotal();
-    });
-    subSel.addEventListener('change', () => {
-      splitRows[i].subCategory = subSel.value;
-    });
-    // Amount input
-    const inp = document.createElement('input');
-    inp.type = 'text';
-    inp.inputMode = 'decimal';
-    inp.className = 'split-amt';
-    inp.value = r.amount > 0 ? r.amount.toFixed(2) : '';
-    inp.placeholder = '0.00';
-    inp.addEventListener('input', () => {
-      splitRows[i].amount = parseFloat(inp.value) || 0;
-      updateSplitTotal();
-    });
-    // Remove button
-    const rem = document.createElement('button');
-    rem.className = 'split-remove';
-    rem.textContent = '✕';
-    rem.addEventListener('click', () => { removeSplitRow(i); });
-    if(splitRows.length < 2) rem.style.visibility = 'hidden';
-
-    row.appendChild(sel);
-    row.appendChild(subSel);
-    row.appendChild(inp);
-    row.appendChild(rem);
-    wrap.appendChild(row);
-  });
-  $('btn-add-split-row').classList.toggle('hidden', splitRows.length >= Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS).length);
-}
-
-function fillSubSelect(sel, cat, selected){
-  sel.innerHTML = '<option value="">—</option>';
-  const subs = (categorySubs || DEFAULT_CATEGORY_SUBS)[cat] || [];
-  subs.forEach(s => {
-    const opt = document.createElement('option');
-    opt.value = s;
-    opt.textContent = s;
-    if(s === selected) opt.selected = true;
-    sel.appendChild(opt);
-  });
-}
-
-function updateSplitTotal(){
-  const sum = splitRows.reduce((a, r) => a + (r.amount || 0), 0);
-  if(splitActive){
-    $('amount-display').textContent = sum.toFixed(2);
-  }
-  // Balance indicator
-  const total = parseMoney(amountStr);
-  const el = $('split-balance');
-  el.classList.remove('hidden', 'ok', 'over');
-  if(splitRows.length === 0 || total <= 0){ el.textContent = ''; el.classList.add('hidden'); return; }
-  const remaining = +(total - sum).toFixed(2);
-  if(Math.abs(remaining) < 0.01){
-    el.textContent = '✓ Balanced';
-    el.classList.add('ok');
-  }else if(remaining > 0){
-    el.textContent = `RM ${remaining.toFixed(2)} remaining`;
-  }else{
-    el.textContent = `RM ${Math.abs(remaining).toFixed(2)} over`;
-    el.classList.add('over');
-  }
-}
-
-function addSplitRow(){
-  const cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
-  if(splitRows.length >= cats.length) return;
-  const used = splitRows.map(r => r.category);
-  const avail = cats.find(c => !used.includes(c)) || 'Others';
-  splitRows.push({ category: avail, subCategory: '', amount: 0 });
-  buildSplitRows();
-  updateSplitTotal();
-}
-
-function removeSplitRow(idx){
-  if(splitRows.length <= 1) return;
-  splitRows.splice(idx, 1);
-  buildSplitRows();
-  updateSplitTotal();
-}
-
-function resetSplit(){
-  splitActive = false;
-  splitRows = [];
-  const panel = $('split-panel');
-  const info = $('split-info');
-  const btn = $('btn-split-toggle');
-  const disp = $('amount-display');
-  if(panel) panel.classList.add('hidden');
-  if(info) info.classList.add('hidden');
-  if(btn){ btn.textContent = '⚡ Split'; btn.style.background = ''; btn.style.color = ''; }
-  if(disp) disp.style.opacity = '1';
-  const c = $('cat-chips');
-  if(c) c.classList.remove('hidden');
-}
-
-/* ─── MRU order update (non-blocking) ─── */
-function updateMruOrder(cat, payment){
-  if(!currentUser) return;
-  // Update in-memory categoryOrder
-  let catArr = categoryOrder.slice();
-  const ci = catArr.indexOf(cat);
-  if(ci > 0) catArr.splice(ci, 1);
-  if(ci !== 0) catArr.unshift(cat);
-  categoryOrder = catArr;
-  // Update in-memory accountOrder
-  let accArr = accountOrder.slice();
-  const ai = accArr.indexOf(payment);
-  if(ai > 0) accArr.splice(ai, 1);
-  if(ai !== 0) accArr.unshift(payment);
-  accountOrder = accArr;
-  // Persist silently
-  const updates = {};
-  updates[`users/${currentUser.uid}/settings/categoryOrder`] = catArr;
-  updates[`users/${currentUser.uid}/settings/accountOrder`] = accArr;
-  db.ref().update(updates).catch(()=>{});
-}
 
 // expense-for input + suggest
 $('add-expense-for').addEventListener('input',()=>{
@@ -1214,11 +982,27 @@ let currentPayMethods = Object.keys(DEFAULT_ACCOUNTS).slice();
 function buildPayChips(methods, selected){
   currentPayMethods = methods;
   const wrap = $('pay-chips');
-  wrap.innerHTML = methods.map(m => {
+  const top4 = getTop(methods, payFreq, 4);
+  const hasMore = methods.length > 4 && !showAllPay;
+  const display = showAllPay ? methods : top4;
+  wrap.innerHTML = display.map(m => {
     const cls = m === selected ? 'tile on' : 'tile';
     const color = accountColors[m] || DEFAULT_ACCOUNTS[m] || '#64748b';
     return `<div class="${cls}" style="display:inline-flex;align-items:center;gap:4px" data-m="${esc(m)}"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0"></span>${esc(m)}</div>`;
   }).join('');
+  if(hasMore){
+    const more = document.createElement('div');
+    more.className = 'tile more-tile';
+    more.textContent = `+${methods.length - 4} more`;
+    more.addEventListener('click',()=>{ showAllPay = true; buildPayChips(methods, selected); });
+    wrap.appendChild(more);
+  }else if(showAllPay && methods.length > 4){
+    const less = document.createElement('div');
+    less.className = 'tile more-tile';
+    less.textContent = '← Less';
+    less.addEventListener('click',()=>{ showAllPay = false; buildPayChips(methods, selected); });
+    wrap.appendChild(less);
+  }
   wrap.querySelectorAll('.tile').forEach(el => {
     el.addEventListener('click', () => {
       wrap.querySelectorAll('.tile').forEach(t => t.classList.remove('on'));
@@ -1261,74 +1045,114 @@ $('btn-delete').addEventListener('click',()=>{
   }
 });
 
-/* ─── REALLOCATE ─── */
-let reallocateSrcExpense = null;   // the expense being reallocated from
-let reallocateAmountStr = '';
+/* ─── ACTION (Reimburse / Reallocate) ─── */
+let actionSrcExpense = null;
+let actionAmountStr = '';
+let actionSelCat = '';
+let actionSelSub = '';
+let actionType = 'reimburse'; // 'reimburse' | 'reallocate'
 
-function openReallocateModal(expense){
-  reallocateSrcExpense = expense;
-  reallocateAmountStr = '';
-  $('reallocate-amount-display').textContent = '0.00';
-  $('reallocate-date').value = fmtDate(now());
-  $('reallocate-notes').value = '';
-  $('reallocate-expense-for').value = '';
-  $('reallocate-error').style.display = 'none';
+function openActionModal(expense){
+  actionSrcExpense = expense;
+  actionAmountStr = '';
+  $('action-amount-display').textContent = '0.00';
+  $('action-date').value = fmtDate(now());
+  $('action-notes').value = '';
+  $('action-expense-for').value = '';
+  $('action-error').style.display = 'none';
+  actionType = 'reimburse';
+
+  // Build payment chips
+  loadPaymentMethods(expense._uid || currentUser.uid).then(methods => {
+    const payWrap = $('action-pay-chips');
+    payWrap.innerHTML = '';
+    const pay = expense.payment || methods[0] || 'Cash';
+    methods.forEach(m => {
+      const el = document.createElement('div');
+      el.className = 'tile' + (m === pay ? ' on' : '');
+      el.textContent = m;
+      el.addEventListener('click', () => {
+        payWrap.querySelectorAll('.tile').forEach(t => t.classList.remove('on'));
+        el.classList.add('on');
+      });
+      payWrap.appendChild(el);
+    });
+  });
 
   // Build category chips
-  buildReallocateCatChips('');
-  $('reallocate-sub-chips').classList.add('hidden');
-  $('reallocate-cat-back').style.display = 'none';
-  $('reallocate-suggest').innerHTML = '';
+  buildActionCatChips('');
+  $('action-sub-chips').classList.add('hidden');
+  $('action-cat-back').style.display = 'none';
+  $('action-suggest').innerHTML = '';
 
-  $('reallocate-modal').classList.remove('hidden');
+  // Show modal - start with reimburse
+  switchAction('reimburse');
+  $('action-modal').classList.remove('hidden');
 }
 
-function closeReallocateModal(){
-  $('reallocate-modal').classList.add('hidden');
-  reallocateSrcExpense = null;
-  reallocateAmountStr = '';
+function closeActionModal(){
+  $('action-modal').classList.add('hidden');
+  actionSrcExpense = null;
+  actionAmountStr = '';
 }
 
-$('btn-reallocate-close').addEventListener('click', closeReallocateModal);
+$('btn-action-close').addEventListener('click', closeActionModal);
 
-// Reallocate button on edit screen
-$('btn-reallocate').addEventListener('click', ()=>{
+// Action button on edit screen
+$('btn-action').addEventListener('click', ()=>{
   if(!editTarget) return;
-  // Re-fetch the current expense data from Firebase for latest amount
   if(!currentUser) return;
   expRef(editTarget.uid).child(editTarget.id).once('value').then(snap=>{
     const exp = snap.val();
     if(!exp){ alert('Expense not found'); return; }
     exp.id = editTarget.id;
     exp._uid = editTarget.uid;
-    openReallocateModal(exp);
+    openActionModal(exp);
   });
 });
 
-// Numpad for reallocate modal
-document.querySelectorAll('#reallocate-modal .numpad button').forEach(btn=>{
+// Toggle pill switching
+function switchAction(type){
+  actionType = type;
+  document.querySelectorAll('.action-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.action === type);
+  });
+  const isRealloc = type === 'reallocate';
+  $('action-cat-section').style.display = isRealloc ? 'block' : 'none';
+  $('action-notes-field').style.display = isRealloc ? 'block' : 'none';
+  $('action-pay-field').style.display = isRealloc ? 'none' : 'block';
+  $('action-modal-title').textContent = isRealloc ? '↻ Reallocate' : '↩ Reimburse';
+  $('btn-action-confirm').textContent = isRealloc ? 'Reallocate' : 'Reimburse';
+  $('action-desc').textContent = isRealloc
+    ? 'Move part of this expense to a new category with a different date.'
+    : 'Record a payback against this expense.';
+}
+
+document.querySelectorAll('.action-pill').forEach(p => {
+  p.addEventListener('click', () => switchAction(p.dataset.action));
+});
+
+// Numpad for action modal
+document.querySelectorAll('#action-modal .numpad button').forEach(btn=>{
   btn.addEventListener('click',()=>{
     const k=btn.dataset.k;
-    if(k==='C'){ reallocateAmountStr=''; }
-    else if(k==='.'&&reallocateAmountStr.includes('.')){}
-    else if(k==='0'&&reallocateAmountStr===''){}
+    if(k==='C'){ actionAmountStr=''; }
+    else if(k==='.'&&actionAmountStr.includes('.')){}
+    else if(k==='0'&&actionAmountStr===''){}
     else {
-      const next=reallocateAmountStr+k;
+      const next=actionAmountStr+k;
       const parts=next.split('.');
       if(parts[1]&&parts[1].length>2){}
       else if(next.replace('.','').length>8){}
-      else { reallocateAmountStr=next; }
+      else { actionAmountStr=next; }
     }
-    $('reallocate-amount-display').textContent=reallocateAmountStr?parseFloat(reallocateAmountStr).toFixed(2):'0.00';
+    $('action-amount-display').textContent=actionAmountStr?parseFloat(actionAmountStr).toFixed(2):'0.00';
   });
 });
 
-// Category chips in reallocate modal
-let reallocateSelCat = '';
-let reallocateSelSub = '';
-
-function buildReallocateCatChips(selected){
-  const wrap = $('reallocate-cat-chips');
+// Category chips in action modal
+function buildActionCatChips(selected){
+  const wrap = $('action-cat-chips');
   wrap.innerHTML = '';
   wrap.classList.remove('hidden');
   const cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
@@ -1339,32 +1163,32 @@ function buildReallocateCatChips(selected){
     el.addEventListener('click',()=>{
       const subs = categorySubs && categorySubs[c];
       if(!subs || subs.length===0){
-        reallocateSelCat = c;
-        reallocateSelSub = '';
-        $('reallocate-expense-for').value = c;
-        buildReallocateCatChips(c);
-        $('reallocate-sub-chips').classList.add('hidden');
-        $('reallocate-cat-back').style.display = 'none';
+        actionSelCat = c;
+        actionSelSub = '';
+        $('action-expense-for').value = c;
+        buildActionCatChips(c);
+        $('action-sub-chips').classList.add('hidden');
+        $('action-cat-back').style.display = 'none';
       }else{
-        reallocateSelCat = c;
-        reallocateSelSub = '';
-        showReallocateSubChips(c, subs);
+        actionSelCat = c;
+        actionSelSub = '';
+        showActionSubChips(c, subs);
       }
     });
     wrap.appendChild(el);
   });
 }
 
-function showReallocateSubChips(cat, subs){
-  $('reallocate-cat-chips').classList.add('hidden');
-  const wrap = $('reallocate-sub-chips');
+function showActionSubChips(cat, subs){
+  $('action-cat-chips').classList.add('hidden');
+  const wrap = $('action-sub-chips');
   wrap.innerHTML = '';
   wrap.classList.remove('hidden');
-  const back = $('reallocate-cat-back');
+  const back = $('action-cat-back');
   back.style.display = 'block';
   back.onclick = ()=>{
     wrap.classList.add('hidden');
-    $('reallocate-cat-chips').classList.remove('hidden');
+    $('action-cat-chips').classList.remove('hidden');
     back.style.display = 'none';
   };
   // "No subcategory" option
@@ -1372,12 +1196,12 @@ function showReallocateSubChips(cat, subs){
   none.className = 'tile';
   none.textContent = cat + ' (no sub)';
   none.addEventListener('click',()=>{
-    reallocateSelSub = '';
-    $('reallocate-expense-for').value = cat;
+    actionSelSub = '';
+    $('action-expense-for').value = cat;
     wrap.classList.add('hidden');
-    $('reallocate-cat-chips').classList.remove('hidden');
+    $('action-cat-chips').classList.remove('hidden');
     back.style.display = 'none';
-    buildReallocateCatChips(cat);
+    buildActionCatChips(cat);
   });
   wrap.appendChild(none);
   subs.forEach(item=>{
@@ -1385,107 +1209,136 @@ function showReallocateSubChips(cat, subs){
     el.className = 'tile';
     el.textContent = item;
     el.addEventListener('click',()=>{
-      reallocateSelCat = cat;
-      reallocateSelSub = item;
-      $('reallocate-expense-for').value = cat + ' - ' + item;
+      actionSelCat = cat;
+      actionSelSub = item;
+      $('action-expense-for').value = cat + ' - ' + item;
       wrap.classList.add('hidden');
-      $('reallocate-cat-chips').classList.remove('hidden');
+      $('action-cat-chips').classList.remove('hidden');
       back.style.display = 'none';
-      buildReallocateCatChips(cat);
+      buildActionCatChips(cat);
     });
     wrap.appendChild(el);
   });
 }
 
-// Suggest for reallocate category input
-$('reallocate-expense-for').addEventListener('input',()=>{
-  const val = $('reallocate-expense-for').value.toLowerCase().trim();
-  const box = $('reallocate-suggest');
+// Suggest for action category input
+$('action-expense-for').addEventListener('input',()=>{
+  const val = $('action-expense-for').value.toLowerCase().trim();
+  const box = $('action-suggest');
   if(!val || !currentUser){ box.innerHTML=''; return; }
   loadExpenses(currentUser.uid).then(list=>{
     const matches=[];
     list.forEach(e=>{ const label = e.category + (e.subCategory ? ' - ' + e.subCategory : ''); if(label.toLowerCase().includes(val)) matches.push(label); });
     QUICK_TILES.forEach(t=>{ if(t.category.toLowerCase().includes(val)) matches.push(t.category); });
     const uniq=[...new Set(matches)].slice(0,6);
-    box.innerHTML=uniq.map(m=>`<span class=\"suggest-chip\" onclick=\"window.setReallocateExpenseFor('${esc(m)}')\">${esc(m)}</span>`).join('');
+    box.innerHTML=uniq.map(m=>`<span class=\"suggest-chip\" onclick=\"window.setActionExpenseFor('${esc(m)}')\">${esc(m)}</span>`).join('');
   });
 });
 
-window.setReallocateExpenseFor = function(m){
-  $('reallocate-expense-for').value = m;
-  $('reallocate-suggest').innerHTML = '';
+window.setActionExpenseFor = function(m){
+  $('action-expense-for').value = m;
+  $('action-suggest').innerHTML = '';
   const parts=m.split(' - ');
-  reallocateSelCat=parts[0];
-  reallocateSelSub=parts[1]||'';
-  buildReallocateCatChips(reallocateSelCat);
-  $('reallocate-sub-chips').classList.add('hidden');
-  $('reallocate-cat-back').style.display = 'none';
+  actionSelCat=parts[0];
+  actionSelSub=parts[1]||'';
+  buildActionCatChips(actionSelCat);
+  $('action-sub-chips').classList.add('hidden');
+  $('action-cat-back').style.display = 'none';
 };
 
-// Confirm reallocate
-$('btn-reallocate-confirm').addEventListener('click',()=>{
-  const err = $('reallocate-error');
-  const amount = parseMoney(reallocateAmountStr);
-  const src = reallocateSrcExpense;
+// Confirm action
+$('btn-action-confirm').addEventListener('click',()=>{
+  const err = $('action-error');
+  const amount = parseMoney(actionAmountStr);
+  const src = actionSrcExpense;
   if(!src){ err.textContent='No source expense'; err.style.display='block'; return; }
-  if(amount <= 0){ err.textContent='Enter amount to move'; err.style.display='block'; return; }
-  if(!reallocateSelCat){ err.textContent='Select a category'; err.style.display='block'; return; }
-  if(amount > src.amount){ err.textContent='Cannot move more than the original amount (RM '+src.amount.toFixed(2)+')'; err.style.display='block'; return; }
+  if(amount <= 0){ err.textContent='Enter an amount'; err.style.display='block'; return; }
 
-  err.style.display = 'none';
-  const newDate = $('reallocate-date').value || fmtDate(now());
-  const notes = $('reallocate-notes').value.trim();
-  const ts = Date.now();
-
-  // Build the new expense (e.g. Haircut RM20)
-  const newExpense = {
-    category: reallocateSelCat,
-    subCategory: reallocateSelSub || null,
-    amount: amount,
-    payment: src.payment || 'Cash',
-    notes: notes,
-    date: newDate,
-    timestamp: ts,
-    status: 'approved',
-    type: 'expense',
-    _reallocatedFrom: src._uid + '/' + src.id
-  };
-
-  // Build the adjustment entry (e.g. Food -RM20 on original date)
-  // Stored as negative amount — naturally subtracts from totals in both SPENT and Expensed
-  const adjExpense = {
-    category: src.category,
-    subCategory: src.subCategory || null,
-    amount: -amount,
-    payment: src.payment || 'Cash',
-    notes: 'Realloc → ' + reallocateSelCat + (reallocateSelSub ? ' - ' + reallocateSelSub : ''),
-    date: src.date,
-    timestamp: ts,
-    status: 'approved',
-    type: 'expense',
-    isReallocation: true,
-    _reallocationSource: src._uid + '/' + src.id
-  };
-
-  // Save BOTH entries (parallel)
   const uid = currentUser.uid;
-  Promise.all([
-    saveExpense(uid, newExpense),
-    saveExpense(uid, adjExpense)
-  ]).then(()=>{
-    closeReallocateModal();
-    editTarget = null;
-    showScreen('dash-screen');
-    refreshDash();
-  }).catch(e=>{
-    err.textContent='Error: '+e.message;
-    err.style.display='block';
-  });
+  const date = $('action-date').value || fmtDate(now());
+
+  if(actionType === 'reimburse'){
+    // ── REIMBURSE ──
+    const selectedPay = $('action-pay-chips').querySelector('.tile.on');
+    const payment = selectedPay ? selectedPay.textContent : (src.payment || 'Cash');
+    const data = {
+      amount: -Math.abs(amount),
+      category: src.category,
+      subCategory: src.subCategory || null,
+      payment: payment,
+      date: date,
+      notes: 'Reimbursement for ' + (src.notes || src.category || 'expense'),
+      timestamp: Date.now(),
+      status: 'approved',
+      type: 'expense',
+      reimburses: src.id
+    };
+    saveExpense(uid, data).then(()=>{
+      closeActionModal();
+      editTarget = null;
+      showScreen('dash-screen');
+      refreshDash();
+    }).catch(e=>{
+      err.textContent='Error: '+e.message;
+      err.style.display='block';
+    });
+  } else {
+    // ── REALLOCATE ──
+    if(!actionSelCat){ err.textContent='Select a category'; err.style.display='block'; return; }
+    if(amount > src.amount){ err.textContent='Cannot move more than the original amount (RM '+src.amount.toFixed(2)+')'; err.style.display='block'; return; }
+
+    err.style.display = 'none';
+    const notes = $('action-notes').value.trim();
+    const ts = Date.now();
+
+    // New expense
+    const newExpense = {
+      category: actionSelCat,
+      subCategory: actionSelSub || null,
+      amount: amount,
+      payment: src.payment || 'Cash',
+      notes: notes,
+      date: date,
+      timestamp: ts,
+      status: 'approved',
+      type: 'expense',
+      _reallocatedFrom: src._uid + '/' + src.id
+    };
+
+    // Adjustment entry (negative amount on original date)
+    const adjExpense = {
+      category: src.category,
+      subCategory: src.subCategory || null,
+      amount: -amount,
+      payment: src.payment || 'Cash',
+      notes: 'Realloc \u2192 ' + actionSelCat + (actionSelSub ? ' - ' + actionSelSub : ''),
+      date: src.date,
+      timestamp: ts,
+      status: 'approved',
+      type: 'expense',
+      isReallocation: true,
+      _reallocationSource: src._uid + '/' + src.id
+    };
+
+    // Save BOTH entries (parallel)
+    Promise.all([
+      saveExpense(uid, newExpense),
+      saveExpense(uid, adjExpense)
+    ]).then(()=>{
+      closeActionModal();
+      editTarget = null;
+      showScreen('dash-screen');
+      refreshDash();
+    }).catch(e=>{
+      err.textContent='Error: '+e.message;
+      err.style.display='block';
+    });
+  }
 });
 
 // Close modal on overlay click
-$('reallocate-modal').addEventListener('click',e=>{
-  if(e.target === $('reallocate-modal')) closeReallocateModal();
+$('action-modal').addEventListener('click',e=>{
+  if(e.target === $('action-modal')) closeActionModal();
 });
 
 /* ─── REVIEW SCREEN ─── */
@@ -1605,12 +1458,6 @@ function renderSettings(){
     loadPaymentMethods(uid).then(()=>{
       renderAccountsList();
     });
-
-    // Show current theme selection
-    const currentTheme = settings.theme || 'dark';
-    $('theme-chips').querySelectorAll('.tile').forEach(t=>{
-      t.classList.toggle('on', t.dataset.theme === currentTheme);
-    });
   });
 
   // Owner panels
@@ -1678,23 +1525,20 @@ function renderAccountsList(addNew, useDefaults){
   const names = Object.keys(src);
   let html = names.map((name,i)=>{
     const color = src[name] || '#64748b';
-    const hidden = hiddenAccounts[name];
     return `<div class="acc-row" style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
-      <input type="checkbox" class="acc-show" ${hidden ? '' : 'checked'} style="accent-color:var(--accent);width:16px;height:16px;flex-shrink:0" title="Show">
       <input type="color" class="acc-color" value="${color}"
         style="width:30px;height:30px;border:none;border-radius:4px;cursor:pointer;padding:0;background:transparent">
       <input class="acc-name" value="${esc(name)}"
-        style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;color:var(--input-text);font-size:.82rem;padding:.3rem .5rem">
+        style="flex:1;background:#0b1221;border:1px solid #334155;border-radius:4px;color:#f8fafc;font-size:.82rem;padding:.3rem .5rem">
       <button class="acc-del" style="background:transparent;border:none;color:#ef4444;cursor:pointer;font-size:.9rem;padding:2px 6px">×</button>
     </div>`;
   }).join('');
   if(addNew){
     html += `<div class="acc-row" style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
-      <input type="checkbox" class="acc-show" checked style="accent-color:var(--accent);width:16px;height:16px;flex-shrink:0" title="Show">
       <input type="color" class="acc-color" value="#10b981"
         style="width:30px;height:30px;border:none;border-radius:4px;cursor:pointer;padding:0;background:transparent">
       <input class="acc-name" value="" placeholder="New account"
-        style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;color:var(--input-text);font-size:.82rem;padding:.3rem .5rem">
+        style="flex:1;background:#0b1221;border:1px solid #334155;border-radius:4px;color:#f8fafc;font-size:.82rem;padding:.3rem .5rem">
       <button class="acc-del" style="background:transparent;border:none;color:#ef4444;cursor:pointer;font-size:.9rem;padding:2px 6px">×</button>
     </div>`;
   }
@@ -1712,25 +1556,19 @@ $('btn-save-accounts').addEventListener('click',()=>{
   if(!currentUser) return;
   const rows = document.querySelectorAll('#accounts-list .acc-row');
   const obj = {};
-  const hidden = {};
   let validCount = 0;
   rows.forEach(row=>{
     const name = row.querySelector('.acc-name').value.trim();
     const color = row.querySelector('.acc-color').value;
-    const shown = row.querySelector('.acc-show').checked;
-    if(name){ obj[name] = color; if(!shown) hidden[name] = true; validCount++; }
+    if(name){ obj[name] = color; validCount++; }
   });
   if(validCount===0){
     $('accounts-status').textContent = '❌ At least one account required';
     return;
   }
-  const updates = {};
-  updates[`users/${currentUser.uid}/settings/accounts`] = obj;
-  updates[`users/${currentUser.uid}/settings/hiddenAccounts`] = hidden;
-  db.ref().update(updates).then(()=>{
+  db.ref(`users/${currentUser.uid}/settings/accounts`).set(obj).then(()=>{
     accountColors = obj;
-    hiddenAccounts = hidden;
-    currentPayMethods = Object.keys(obj).filter(n => !hidden[n]);
+    currentPayMethods = Object.keys(obj);
     $('accounts-status').textContent = '✅ Saved';
     setTimeout(()=>{$('accounts-status').textContent='';}, 2000);
   }).catch(e=>{
@@ -1740,7 +1578,6 @@ $('btn-save-accounts').addEventListener('click',()=>{
 
 $('btn-reset-accounts').addEventListener('click',()=>{
   accountColors = {};
-  hiddenAccounts = {};
   renderAccountsList(false, true);
   $('accounts-status').textContent = 'Defaults restored — save to confirm';
 });
@@ -1784,18 +1621,6 @@ $('btn-export').addEventListener('click',()=>{
     a.download = `spent_${profile.name}_${fmtDate(now())}.json`;
     a.click();
   });
-});
-
-// Theme chips (single-select)
-$('theme-chips').addEventListener('click', e => {
-  const chip = e.target.closest('.tile');
-  if(!chip) return;
-  const theme = chip.dataset.theme;
-  if(!theme) return;
-  $('theme-chips').querySelectorAll('.tile').forEach(t => t.classList.remove('on'));
-  chip.classList.add('on');
-  applyTheme(theme);
-  if(currentUser) saveSettings(currentUser.uid, { theme });
 });
 
 $('btn-clear').addEventListener('click',()=>{
@@ -1856,67 +1681,12 @@ function deleteBill(uid, billId){
   return billsRef(uid).child(billId).remove();
 }
 
-/* ─── BILL NOTIFICATIONS ─── */
-function checkBillNotifications(uid){
-  // Dedup: only once per day per device
-  try{
-    const today = new Date().toDateString();
-    const last = localStorage.getItem('_billNotifDate');
-    if(last === today) return; // already notified today
-  }catch(e){}
-  
-  loadBills(uid).then(bills=>{
-    const n=new Date(), today=n.getDate(), mk=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
-    let overdue=0, due=0, names=[];
-    bills.forEach(b=>{
-      if(b.active===false||!b.dueDay)return;
-      if(b.paidMonths&&b.paidMonths[mk])return;
-      const diff=today-b.dueDay;
-      if(diff>0){overdue++;names.push('\u{1f534} '+b.name);}
-      else if(diff>=-3){due++;if(names.length<3)names.push('\u{1f7e1} '+b.name);}
-    });
-    if(overdue||due){
-      const title='\u{1f4b3} '+(overdue?overdue+' overdue':'')+(overdue&&due?' \u00b7 ':'')+(due?due+' due soon':'');
-      const body=names.slice(0,4).join('\\n');
-      if(typeof AndroidNotification!=='undefined'){
-        AndroidNotification.show(title, body);
-        try{localStorage.setItem('_billNotifDate', new Date().toDateString());}catch(e){}
-      }
-    }
-  }).catch(e=>console.warn('[Bills] check error:',e));
-}
-
-function registerSpentFCM(uid){
-  if(typeof AndroidNotification==='undefined')return;
-  try{
-    // Request FCM token from Firebase JS SDK and store via native bridge
-    if(typeof firebase!=='undefined'&&firebase.messaging){
-      firebase.messaging().getToken().then(token=>{
-        AndroidNotification.storeTokenInDb(uid,token,'spent-web');
-      }).catch(()=>{});
-    }
-  }catch(e){}
-}
-
 /* ─── BILLS NAV ─── */
-let billEditMode = false;
-
 $('btn-bills').addEventListener('click',()=>{
   showScreen('bills-screen');
   renderBills();
-  if(billEditMode) {
-    $('bills-list').classList.add('bills-edit-mode');
-    $('btn-bill-edit-mode').classList.add('active');
-  }
 });
 $('btn-bills-back').addEventListener('click',()=>showScreen('dash-screen'));
-$('btn-bill-edit-mode').addEventListener('click',()=>{
-  billEditMode = !billEditMode;
-  $('btn-bill-edit-mode').classList.toggle('active', billEditMode);
-  const list = $('bills-list');
-  if(billEditMode) list.classList.add('bills-edit-mode');
-  else list.classList.remove('bills-edit-mode');
-});
 
 // Live search filter
 $('bill-search').addEventListener('input', () => renderBills());
@@ -1991,25 +1761,6 @@ function togglePaid(uid, billId, monthKey, isPaid){
     ? billsRef(uid).child(billId).child('paidMonths').child(monthKey).remove()
     : billsRef(uid).child(billId).child('paidMonths').child(monthKey).set(true);
   promise.then(() => {
-    // Auto-create expense when marking as paid and bill has account+category+amount
-    if(!isPaid){
-      billsRef(uid).child(billId).once('value').then(snap => {
-        const bill = snap.val();
-        if(bill && bill.account && bill.category && bill.amount){
-          saveExpense(uid, {
-            category: bill.category,
-            amount: bill.amount,
-            payment: bill.account,
-            subCategory: bill.subCategory || '',
-            notes: (bill.name || 'Bill') + ' (Auto)',
-            date: fmtDate(now()),
-            timestamp: Date.now(),
-            status: 'approved',
-            type: 'expense'
-          });
-        }
-      });
-    }
     const p = renderBills();
     updateBillBadge();
     // Restore scroll after renderBills has finished its async DOM rebuild
@@ -2180,16 +1931,15 @@ function renderBills(){
           <div style="flex:1;min-width:0">
             <span class="item-name">${esc(b.name)}</span>
             <span class="item-meta">${metaParts.join(' · ')}</span>
-            ${b.account && b.category ? '<span class="item-meta" style="font-size:.65rem;opacity:.6">'+esc(b.account)+' · '+esc(b.category)+(b.subCategory?' · '+esc(b.subCategory):'')+'</span>' : ''}
           </div>
-          ${isRecentlyUpdated(b.emailUpdatedAt) ? '<span class="bill-updated-badge">Updated</span>' : ''}${b.amount ? '<span class="bill-amount">RM'+Number(b.amount).toFixed(2)+'</span>' : ''}
-          <button class="btn-ghost btn-xs bill-edit-btn" title="Edit">✎</button>
+          ${isRecentlyUpdated(b.emailUpdatedAt) ? '<span class="bill-updated-badge">Updated</span>' : ''}<span class="item-amount" style="font-size:0.7rem;flex-shrink:0">${fmtMoney(b.amount)}</span><button class="btn-ghost btn-xs bill-edit-btn" title="Edit">✎</button>
         </div>
       `;
 
-      // Tap checkbox to toggle paid
+      // Tap anywhere on the row → toggle paid (except edit btn)
       row.addEventListener('click', e => {
-        if(e.target.classList.contains('bill-check')) togglePaid(currentUser.uid, b.id, mk, isPaid);
+        if(e.target.classList.contains('bill-edit-btn')) return;
+        togglePaid(currentUser.uid, b.id, mk, isPaid);
       });
 
       // Edit button
@@ -2220,10 +1970,8 @@ function isRecentlyUpdated(emailUpdatedAt){
   if(!emailUpdatedAt) return false;
   const updated = new Date(emailUpdatedAt);
   if(isNaN(updated.getTime())) return false;
-  // Badge persists until the first day of the next month
-  const nextMonth = updated.getMonth() + 1;
-  const firstOfNextMonth = new Date(updated.getFullYear() + (nextMonth>11?1:0), nextMonth>11?0:nextMonth, 1);
-  return now() < firstOfNextMonth;
+  const diffHrs = (now() - updated) / 3600000;
+  return diffHrs >= 0 && diffHrs <= 48;
 }
 
 /* ─── NEXT DUE DATE CALC ─── */
@@ -2304,41 +2052,8 @@ function openBillModal(mode, bill){
     });
   }
 
-  // Populate account dropdown
-  loadPaymentMethods(currentUser.uid).then(accts => {
-    const sel = $('bill-account');
-    const saved = bill && bill.account ? bill.account : '';
-    sel.innerHTML = '<option value="">— None —</option>' + accts.map(a => `<option value="${a}"${a===saved?' selected':''}>${a}</option>`).join('');
-  });
-
-  // Populate category dropdown + subcategory
-  loadCategorySubs().then(() => {
-    const cats = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS);
-    const catSel = $('bill-category');
-    const savedCat = bill && bill.category ? bill.category : '';
-    catSel.innerHTML = '<option value="">— None —</option>' + cats.map(c => `<option value="${c}"${c===savedCat?' selected':''}>${c}</option>`).join('');
-    // Populate subcategory based on selected category
-    fillBillSubCat(savedCat, bill && bill.subCategory ? bill.subCategory : '');
-  });
-  // Wire category change → subcategory
-  $('bill-category').onchange = function(){
-    fillBillSubCat(this.value, '');
-  };
-
   $('bill-modal').classList.remove('hidden');
   setTimeout(()=>$('bill-name').focus(), 100);
-}
-
-function fillBillSubCat(cat, selected){
-  const field = $('bill-subcat-field');
-  const sel = $('bill-subcategory');
-  if(!cat || !(categorySubs||{})[cat] || !categorySubs[cat].length){
-    field.style.display = 'none';
-    return;
-  }
-  field.style.display = '';
-  const subs = categorySubs[cat] || [];
-  sel.innerHTML = '<option value="">—</option>' + subs.map(s => `<option value="${s}"${s===selected?' selected':''}>${s}</option>`).join('');
 }
 
 function closeBillModal(){
@@ -2372,12 +2087,6 @@ function saveBillHandler(){
   // Backlog offset: save as relative adjustment (can be negative)
   const backlogVal = $('bill-backlog').value.trim();
   const data = { name, amount, dueDay, reminderDays, active, updatedAt: firebase.database.ServerValue.TIMESTAMP };
-  const acct = $('bill-account').value;
-  const cat = $('bill-category').value;
-  const sub = $('bill-subcategory').value;
-  if(acct) data.account = acct;
-  if(cat) data.category = cat;
-  if(sub) data.subCategory = sub;
   if(backlogVal !== ''){
     const entered = parseInt(backlogVal) || 0;
     const currentMk = editingBill ? billMonthKey(editingBill) : billMonthKey({dueDay});
