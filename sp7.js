@@ -56,9 +56,9 @@ const DEFAULT_SUBCATEGORIES = {
   'Home': ['Rent','Repair','Cleaning','Decor'],
   'Others': []
 };
-const QUICK_TILES = [
+let QUICK_TILES = [
   { category: 'Food' },
-  { category: 'Transport' },
+  { category: 'Wife' },
   { category: 'Shopping' },
   { category: 'Utilities' },
   { category: 'Entertainment' }
@@ -104,6 +104,12 @@ function esc(s){ const d=document.createElement('div'); d.textContent=s; return 
 function loadCategorySubs(){
   return db.ref('config/categorySubs').once('value').then(s=>{
     categorySubs = s.val() || DEFAULT_CATEGORY_SUBS;
+    // Rebuild QUICK_TILES from user's actual categories, sorted by frequency
+    QUICK_TILES = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS)
+      .filter(c => !['Investment','Stocks','Inheritance','Salary','Claim','Insurance Refund','Extras','Office','Gift','Bonus'].includes(c))
+      .sort((a,b)=>(catFreq[b]||0)-(catFreq[a]||0))
+      .slice(0, 5)
+      .map(c => ({ category: c }));
     // Populate hidden category select to match config
     const sel = $('add-category');
     if(sel){
@@ -436,8 +442,8 @@ function renderDash(combined, today, monthPrefix, approvedPartners){
     });
   }
   
-  const todaySum = heroData.filter(e=>e.date===today && e.type!=='income').reduce((a,e)=> a + e.amount, 0);
-  const monthSum = heroData.filter(e=>e.date.startsWith(monthPrefix) && e.type!=='income').reduce((a,e)=> a + e.amount, 0);
+  const todaySum = heroData.filter(e=>e.date===today && e.type!=='income' && e.type!=='investment').reduce((a,e)=> a + e.amount, 0);
+  const monthSum = heroData.filter(e=>e.date.startsWith(monthPrefix) && e.type!=='income' && e.type!=='investment').reduce((a,e)=> a + e.amount, 0);
   $('hero-today').textContent = fmtMoney(todaySum);
   $('hero-month').textContent = fmtMoney(monthSum);
 
