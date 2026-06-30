@@ -17,7 +17,7 @@ firebase.initializeApp(FIREBASE_CONFIG);
 const auth = firebase.auth();
 const db = firebase.database();
 
-const APP_VER = 'v2.8.17';
+const APP_VER = 'v2.8.18';
 $('global-version').textContent = APP_VER;
 
 /* ─── CONSTANTS ─── */
@@ -1764,13 +1764,16 @@ function computeBacklog(bill, monthKey){
 function computeRecurringTotal(bill, monthKey){
   // For recurring bills, amount = monthly figure.
   // Outstanding = unpaid months × amount.
-  // Uses auto-backlog ONLY — ignores manual backlogOffset.
+  // Uses computeBacklog which respects backlogOffset.
+  // When backlogOffset is set, it's user-managed and already final.
+  // When unset, auto-calculate past + current month.
   if(!bill.recurring) return bill.amount || 0;
-  const auto = computeAutoBacklog(bill, monthKey);
+  const backlog = computeBacklog(bill, monthKey);
   const pm = bill.paidMonths || {};
+  const hasOffset = bill.backlogOffset !== null && bill.backlogOffset !== undefined;
+  if(hasOffset) return Math.max(0, backlog) * (bill.amount || 0);
   const currentMonthUnpaid = !pm[monthKey] ? 1 : 0;
-  const effective = Math.max(0, auto) + currentMonthUnpaid;
-  return effective * (bill.amount || 0);
+  return (Math.max(0, backlog) + currentMonthUnpaid) * (bill.amount || 0);
 }
 
 function renderBillAmount(bill, monthKey){
@@ -1878,7 +1881,10 @@ function renderBills(){
       const mk = billMonthKey(b);
       const pm = b.paidMonths || {};
       if(pm[mk]) paidCount++;
-      backlogCount += computeBacklog(b, mk);
+      let bklg = computeBacklog(b, mk);
+      const hasOffset = b.backlogOffset !== null && b.backlogOffset !== undefined;
+      if(b.recurring && !hasOffset && !pm[mk]) bklg += 1;
+      backlogCount += bklg;
     });
 
     // Summary strip
@@ -1938,7 +1944,12 @@ function renderBills(){
       const checkChar = isPaid ? '☑' : '☐';
 
       let metaParts = [`Day ${b.dueDay}`, `<span class="${dueClass}">${dueLabel}</span>`];
-      if(backlog > 1) metaParts.push(`<span class="bill-due-overdue">+${backlog} unpaid</span>`);
+      // For recurring bills, display includes current month
+      // unless backlogOffset is set (user already accounted for it)
+      let displayBacklog = backlog;
+      const hasOffset = b.backlogOffset !== null && b.backlogOffset !== undefined;
+      if(b.recurring && !hasOffset && !isPaid) displayBacklog += 1;
+      if(displayBacklog > 1) metaParts.push(`<span class="bill-due-overdue">+${displayBacklog} unpaid</span>`);
       else if(backlog < 0) metaParts.push(`<span style="color:var(--accent-2);font-weight:600">★ Ahead by ${Math.abs(backlog)}</span>`);
 
       const row = document.createElement('div');
