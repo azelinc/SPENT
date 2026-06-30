@@ -56,9 +56,9 @@ const DEFAULT_SUBCATEGORIES = {
   'Home': ['Rent','Repair','Cleaning','Decor'],
   'Others': []
 };
-const QUICK_TILES = [
+let QUICK_TILES = [
   { category: 'Food' },
-  { category: 'Transport' },
+  { category: 'Wife' },
   { category: 'Shopping' },
   { category: 'Utilities' },
   { category: 'Entertainment' }
@@ -104,6 +104,12 @@ function esc(s){ const d=document.createElement('div'); d.textContent=s; return 
 function loadCategorySubs(){
   return db.ref('config/categorySubs').once('value').then(s=>{
     categorySubs = s.val() || DEFAULT_CATEGORY_SUBS;
+    // Rebuild QUICK_TILES from user's actual categories, sorted by frequency
+    QUICK_TILES = Object.keys(categorySubs || DEFAULT_CATEGORY_SUBS)
+      .filter(c => !['Investment','Stocks','Inheritance','Salary','Claim','Insurance Refund','Extras','Office','Gift','Bonus'].includes(c))
+      .sort((a,b)=>(catFreq[b]||0)-(catFreq[a]||0))
+      .slice(0, 5)
+      .map(c => ({ category: c }));
     // Populate hidden category select to match config
     const sel = $('add-category');
     if(sel){
@@ -436,8 +442,8 @@ function renderDash(combined, today, monthPrefix, approvedPartners){
     });
   }
   
-  const todaySum = heroData.filter(e=>e.date===today && e.type!=='income').reduce((a,e)=> a + e.amount, 0);
-  const monthSum = heroData.filter(e=>e.date.startsWith(monthPrefix) && e.type!=='income').reduce((a,e)=> a + e.amount, 0);
+  const todaySum = heroData.filter(e=>e.date===today && e.type!=='income' && e.type!=='investment').reduce((a,e)=> a + e.amount, 0);
+  const monthSum = heroData.filter(e=>e.date.startsWith(monthPrefix) && e.type!=='income' && e.type!=='investment').reduce((a,e)=> a + e.amount, 0);
   $('hero-today').textContent = fmtMoney(todaySum);
   $('hero-month').textContent = fmtMoney(monthSum);
 
@@ -1755,6 +1761,23 @@ function computeBacklog(bill, monthKey){
   return auto - offset; // negative = paid ahead
 }
 
+function computeRecurringTotal(bill, monthKey){
+  // For recurring bills, amount = monthly figure.
+  // Outstanding = unpaid months × amount.
+  if(!bill.recurring) return bill.amount || 0;
+  const backlog = computeBacklog(bill, monthKey);
+  const pm = bill.paidMonths || {};
+  const currentMonthUnpaid = !pm[monthKey] ? 1 : 0;
+  const effective = Math.max(0, backlog) + currentMonthUnpaid;
+  return effective * (bill.amount || 0);
+}
+
+function renderBillAmount(bill, monthKey){
+  const total = computeRecurringTotal(bill, monthKey);
+  if(!bill.recurring) return fmtMoney(bill.amount);
+  return fmtMoney(total);
+}
+
 function togglePaid(uid, billId, monthKey, isPaid){
   const savedScroll = document.scrollingElement.scrollTop;
   const promise = isPaid
@@ -1932,7 +1955,7 @@ function renderBills(){
             <span class="item-name">${esc(b.name)}</span>
             <span class="item-meta">${metaParts.join(' · ')}</span>
           </div>
-          ${isRecentlyUpdated(b.emailUpdatedAt) ? '<span class="bill-updated-badge">Updated</span>' : ''}<span class="item-amount" style="font-size:0.7rem;flex-shrink:0">${fmtMoney(b.amount)}</span><button class="btn-ghost btn-xs bill-edit-btn" title="Edit">✎</button>
+          ${isRecentlyUpdated(b.emailUpdatedAt) ? '<span class="bill-updated-badge">Updated</span>' : ''}<span class="item-amount" style="font-size:0.7rem;flex-shrink:0">${renderBillAmount(b, mk)}</span><button class="btn-ghost btn-xs bill-edit-btn" title="Edit">✎</button>
         </div>
       `;
 
@@ -2033,6 +2056,7 @@ function openBillModal(mode, bill){
     $('bill-backlog').value = '';
     $('bill-due-day').value = '1';
     $('bill-active').checked = true;
+    $('bill-recurring').checked = false;
     $('btn-bill-save').textContent = 'Save Bill';
     $('btn-bill-delete').classList.add('hidden');
     // Set default reminder days: all 3 selected
@@ -2044,6 +2068,7 @@ function openBillModal(mode, bill){
     $('bill-backlog').value = bill.backlogOffset !== undefined && bill.backlogOffset !== null ? String(computeAutoBacklog(bill, billMonthKey(bill)) - bill.backlogOffset) : '';
     $('bill-due-day').value = bill.dueDay;
     $('bill-active').checked = bill.active !== false;
+    $('bill-recurring').checked = bill.recurring === true;
     $('btn-bill-save').textContent = 'Update Bill';
     $('btn-bill-delete').classList.remove('hidden');
 
@@ -2092,7 +2117,12 @@ function saveBillHandler(){
 
   // Backlog offset: save as relative adjustment (can be negative)
   const backlogVal = $('bill-backlog').value.trim();
-  const data = { name, amount, dueDay, reminderDays, active, updatedAt: firebase.database.ServerValue.TIMESTAMP };
+  const recurring = $('bill-recurring').checked;
+  const data = { name, amount, dueDay, reminderDays, active, recurring, updatedAt: firebase.database.ServerValue.TIMESTAMP };
+  if(!recurring && editingBill && editingBill.recurring){
+    // Was recurring, now isn't — remove the flag from DB
+    data.recurring = null;
+  }
   if(backlogVal !== ''){
     const entered = parseInt(backlogVal) || 0;
     const currentMk = editingBill ? billMonthKey(editingBill) : billMonthKey({dueDay});

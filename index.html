@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0f19">
-<!-- v2.7.8 -->
+<!-- v2.8.15 -->
 <title>SPENT</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="SPENT">
-<link rel="stylesheet" href="sp7.css?v=78">
+<link rel="stylesheet" href="sp7.css?v=85">
 </head>
 <body>
 <div id="app">
@@ -265,6 +265,10 @@
           <input type="checkbox" id="bill-active" checked>
           <label for="bill-active" style="margin:0">Active</label>
         </div>
+        <div class="field" style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="bill-recurring">
+          <label for="bill-recurring" style="margin:0">Recurring bill <span class="bill-hint">amount × unpaid months</span></label>
+        </div>
         <div id="bill-modal-error" style="color:var(--danger);font-size:0.8rem;margin:8px 0;display:none"></div>
         <button id="btn-bill-save" class="btn-primary">Save Bill</button>
         <button id="btn-bill-delete" class="btn-danger btn-lg hidden">Delete Bill</button>
@@ -333,6 +337,6 @@
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 
-<script src="sp7.js?v=84"></script>
+<script src="sp7.js?v=85"></script>
 </body>
 </html>
