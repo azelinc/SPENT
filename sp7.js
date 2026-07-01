@@ -1971,9 +1971,9 @@ function renderBills(){
         </div>
       `;
 
-      // Tap anywhere on the row → toggle paid (except edit btn)
+      // Only tapping the checkbox toggles paid — prevents accidental taps
       row.addEventListener('click', e => {
-        if(e.target.classList.contains('bill-edit-btn')) return;
+        if(!e.target.closest('.bill-check')) return;
         togglePaid(currentUser.uid, b.id, mk, isPaid);
       });
 
